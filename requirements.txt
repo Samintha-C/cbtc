@@ -1,0 +1,18 @@
+# Offline analysis stage (CPU only)
+numpy>=1.26
+pandas>=2.0
+matplotlib>=3.8
+
+# GPU stage (model + transcoders + data)
+torch>=2.6          # required by transformer-lens >= 2.16
+# Upstream repo, pinned. The "circuit-tracer" package on PyPI is a third-party fork.
+circuit-tracer @ git+https://github.com/decoderesearch/circuit-tracer.git@v0.5.0
+transformer-lens>=2.16,<3
+transformers>=4.56,<=4.57.3
+datasets>=2.18
+zstandard           # the default corpus is stored as .jsonl.zst
+spacy>=3.7,<3.8     # 3.8 needs numpy 2, transformer-lens 2.x needs numpy<2
+                    # then: python -m spacy download en_core_web_sm
+
+# Optional: LLM labeling of unresolved latents
+anthropic>=0.40
