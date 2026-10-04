@@ -1,0 +1,43 @@
+# GemmaScope 16k transcoders for google/gemma-2-2b, one variant per layer, each the
+# published average_l0 closest to 50 (log scale). Matching L0 across layers keeps
+# dictionary sparsity from driving the census's layer-by-layer differences.
+#
+# circuit-tracer's default set ("gemma") instead takes the sparsest variant per
+# layer, so its L0 ranges from 5 to 95: 49 / 52 / 8 / 11 / 37 at layers 2 / 8 / 14 /
+# 20 / 24. Here the sampled layers get 49 / 52 / 44 / 52 / 59. Layers 2 and 8 are
+# the same files as the default set. Early layers have no variant below 54-95, so
+# the encoders C7 reads at layers 3-11 are not as tightly matched as the rest.
+#
+# Loaded by census.gpu_stage.load_transcoder_spec. Every layer 0-25 must be
+# listed: circuit-tracer requires a transcoder for each layer up to the last.
+repo_id: "google/gemma-scope-2b-pt-transcoders"
+revision: "50eec2f25c60545a9a74c1c3a26a0afdd0b4b872"
+feature_input_hook: "ln2.hook_normalized"
+feature_output_hook: "hook_mlp_out"
+transcoders:
+  - "layer_0/width_16k/average_l0_76/params.npz"
+  - "layer_1/width_16k/average_l0_65/params.npz"
+  - "layer_2/width_16k/average_l0_49/params.npz"
+  - "layer_3/width_16k/average_l0_54/params.npz"
+  - "layer_4/width_16k/average_l0_88/params.npz"
+  - "layer_5/width_16k/average_l0_87/params.npz"
+  - "layer_6/width_16k/average_l0_95/params.npz"
+  - "layer_7/width_16k/average_l0_70/params.npz"
+  - "layer_8/width_16k/average_l0_52/params.npz"
+  - "layer_9/width_16k/average_l0_72/params.npz"
+  - "layer_10/width_16k/average_l0_88/params.npz"
+  - "layer_11/width_16k/average_l0_58/params.npz"
+  - "layer_12/width_16k/average_l0_60/params.npz"
+  - "layer_13/width_16k/average_l0_48/params.npz"
+  - "layer_14/width_16k/average_l0_44/params.npz"
+  - "layer_15/width_16k/average_l0_43/params.npz"
+  - "layer_16/width_16k/average_l0_49/params.npz"
+  - "layer_17/width_16k/average_l0_60/params.npz"
+  - "layer_18/width_16k/average_l0_57/params.npz"
+  - "layer_19/width_16k/average_l0_53/params.npz"
+  - "layer_20/width_16k/average_l0_52/params.npz"
+  - "layer_21/width_16k/average_l0_60/params.npz"
+  - "layer_22/width_16k/average_l0_40/params.npz"
+  - "layer_23/width_16k/average_l0_41/params.npz"
+  - "layer_24/width_16k/average_l0_59/params.npz"
+  - "layer_25/width_16k/average_l0_41/params.npz"
