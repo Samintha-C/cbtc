@@ -14,5 +14,4 @@ zstandard           # the default corpus is stored as .jsonl.zst
 spacy>=3.7,<3.8     # 3.8 needs numpy 2, transformer-lens 2.x needs numpy<2
                     # then: python -m spacy download en_core_web_sm
 
-# Optional: LLM labeling of unresolved latents
-anthropic>=0.40
+# LLM labeling of unresolved latents uses the NRP gateway over plain HTTP: no extra packages

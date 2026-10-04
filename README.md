@@ -60,7 +60,8 @@ python scripts/run_offline.py --run runs/smoke
 
 # 2. real run (defaults: layers 2 8 14 20 24, ~1M tokens, 300 latents/layer)
 python scripts/run_gpu_stage.py --out runs/gemma2b
-python scripts/run_offline.py --run runs/gemma2b --llm      # needs ANTHROPIC_API_KEY
+python scripts/run_offline.py --run runs/gemma2b
+python scripts/run_llm_labels.py --run runs/gemma2b   # NRP LLM gateway; needs NRP_API_KEY
 
 # 3. validate: fill human_read_tag / human_write_tag in the blind sheet, then
 python scripts/validate.py --census runs/gemma2b/census/census.csv \
@@ -89,7 +90,7 @@ lives under `/sc-rwx-vol/cbtc/` on the shared PVC: `runs/<name>/`, `logs/`, and 
 | 1 | `naut/prep-tokens.yaml` | 2 CPU | Tokenise and POS-tag the corpus into `tokens.npz`. |
 | 2 | `naut/collect.yaml` | 1 GPU | The GPU stage: sample latents, cache activations, export weights, ablation KL. No tags yet. |
 | 3 | `naut/classify.yaml` | 4 CPU | The offline stage: rule-based tags, report, validation sheet. |
-| 3 | `naut/classify-llm.yaml` | 4 CPU | Same, plus LLM labels for what the rules leave unresolved, written to `census_llm/`. |
+| 4 | `naut/classify-llm.yaml` | 1 CPU | LLM labels (NRP gateway, `qwen3`) for what the rules leave unresolved, from `census/` into `census_llm/`. Resumable. |
 
 One-time setup:
 
@@ -100,8 +101,8 @@ One-time setup:
 # 2. HuggingFace token for an account that has accepted the Gemma licence.
 kubectl create secret generic sc-hf-token -n wenglab-interpretable-ai --from-literal=token=hf_...
 
-# 3. Only for classify-llm.yaml.
-kubectl create secret generic sc-anthropic-creds -n wenglab-interpretable-ai --from-literal=api_key=sk-ant-...
+# 3. classify-llm.yaml reads an NRP LLM token (https://nrp.ai/llmtoken) from sc-nrp-llm-creds,
+#    key api_key; it already exists in the namespace.
 ```
 
 A run:
