@@ -20,13 +20,48 @@ import torch
 from .data import load_or_build_tokens
 
 STRATA = [0.0, 1e-6, 1e-4, 1e-3, 1e-2, 1e-1, 1.01]
+REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+
+
+def transcoder_spec_path(cfg):
+    """Path of a transcoder_sets/*.yaml file, or None for a circuit-tracer preset."""
+    if not cfg.transcoder_set.endswith((".yaml", ".yml")):
+        return None
+    p = cfg.transcoder_set
+    return p if os.path.isabs(p) else os.path.join(REPO_ROOT, p)
+
+
+def load_transcoder_spec(path):
+    """TranscoderSet from a transcoder_sets/*.yaml file: one GemmaScope params.npz per
+    layer, so each layer's variant (and so its L0) is chosen independently."""
+    import yaml
+    from huggingface_hub import snapshot_download
+    from circuit_tracer.transcoder.single_layer_transcoder import load_transcoder_set
+    with open(path) as f:
+        spec = yaml.safe_load(f)
+    files = spec["transcoders"]
+    local = snapshot_download(spec["repo_id"], revision=spec.get("revision"), allow_patterns=files)
+    # The loader is named explicitly: circuit-tracer's own repo-name check would send
+    # "gemma-scope-2b-..." files to its GemmaScope-2 loader, which cannot read .npz.
+    return load_transcoder_set(
+        {i: os.path.join(local, p) for i, p in enumerate(files)},
+        scan=f"{spec['repo_id']} ({os.path.basename(path)})",
+        feature_input_hook=spec["feature_input_hook"],
+        feature_output_hook=spec["feature_output_hook"],
+        special_load_fn="gemma-scope", dtype=torch.bfloat16,
+        lazy_encoder=False, lazy_decoder=False)
 
 
 def load_model(cfg):
     from circuit_tracer import ReplacementModel
     from circuit_tracer.transcoder import TranscoderSet
-    model = ReplacementModel.from_pretrained(cfg.model_name, cfg.transcoder_set,
-                                             dtype=torch.bfloat16)
+    spec = transcoder_spec_path(cfg)
+    if spec:
+        model = ReplacementModel.from_pretrained_and_transcoders(
+            cfg.model_name, load_transcoder_spec(spec), dtype=torch.bfloat16)
+    else:
+        model = ReplacementModel.from_pretrained(cfg.model_name, cfg.transcoder_set,
+                                                 dtype=torch.bfloat16)
     if not isinstance(model.transcoders, TranscoderSet):
         raise NotImplementedError("CLT support: see README ('Extending to CLTs').")
     return model
@@ -247,6 +282,11 @@ def run_gpu_stage(cfg, out_dir, skip_relevance=False, prep_only=False):
             "layers": cfg.layers, "seq_len": cfg.seq_len, "n_layers": model.cfg.n_layers,
             "d_model": model.cfg.d_model, "d_transcoder": model.transcoders.d_transcoder,
             "vocab_size": V, "pos_tags": pos_tags, "domains": domains}
+    spec = transcoder_spec_path(cfg)
+    if spec:                       # record the exact files, not just the spec's name
+        import yaml
+        with open(spec) as f:
+            meta["transcoder_files"] = yaml.safe_load(f)
     with open(os.path.join(out_dir, "meta.json"), "w") as fh:
         json.dump(meta, fh, indent=2)
 

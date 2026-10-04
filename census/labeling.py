@@ -15,15 +15,16 @@ import re
 import numpy as np
 
 READ_CHOICES = {
-    "B6_semantic": "entity, object, attribute, or topic content",
-    "B7_relational": "a relation or binding between entities (who/what relates to what)",
-    "B8_task_value": "a task variable or value (number range, operand, digit pattern, count)",
-    "B9_epistemic": "meta state: known vs unknown entity, uncertainty, refusal, a planned target",
+    "B7_semantic": "entity, object, attribute, or topic content",
+    "B8_relational": "a relation or binding between entities (who/what relates to what)",
+    "B9_task_value": "a task variable or value (number range, operand, digit pattern, count)",
+    "B10_epistemic": "meta state: known vs unknown entity, uncertainty, refusal, a planned target",
     "B1_lexical": "a specific token or small token family",
     "B2_ngram_prev_token": "a multi-token pattern or the previous token",
     "B3_position_structure": "position or distance to a structural boundary",
     "B4_syntax": "part of speech, morphology, or syntactic role",
     "B5_context": "document- or chunk-level context (language, code, genre, topic chunk)",
+    "B6_next_token": "fires where a specific token or token family is about to come next",
     "B_unclear": "no consistent pattern",
 }
 WRITE_CHOICES = {
@@ -55,15 +56,16 @@ def build_prompt(r):
     write_opts = "\n".join(f"- {k}: {v}" for k, v in WRITE_CHOICES.items())
     ctx = "\n".join(f"  {i + 1}. {c}" for i, c in enumerate(str(r.get("top_contexts", "")).split(" ||| ")))
     stats = {k: _jsonable(r.get(k)) for k in [
-        "layer", "density", "cur_top5_share", "prev_top5_share", "pos_best", "pos_best_share",
-        "seq_coverage", "domain_best", "domain_best_share", "vocab_kurtosis", "vocab_skew",
-        "downstream_ratio"]}
+        "layer", "density", "cur_top5_share", "prev_top5_share", "next_top5_share",
+        "next_top5_excess", "pos_best", "pos_best_share", "seq_coverage", "domain_best",
+        "domain_best_share", "vocab_kurtosis", "vocab_skew", "downstream_rz"]}
     return f"""Layer {r['layer']} transcoder latent {r['feature']}.
 
 Top activating contexts (the firing token is in [[ ]]):
 {ctx}
 
 Tokens carrying the most activation mass: {r.get('top_tokens', '')}
+Tokens that most often come NEXT, right after it fires: {r.get('top_next_tokens', '')}
 Tokens most PROMOTED by its decoder (direct logit effect): {r.get('top_promoted', '')}
 Tokens most SUPPRESSED by its decoder: {r.get('top_suppressed', '')}
 Detector statistics: {json.dumps(stats)}

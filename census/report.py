@@ -66,7 +66,7 @@ def validation_sheet(df, path, n=150, seed=0):
                   .apply(lambda g: g.sample(min(len(g), per), random_state=seed)))
     sample = sample.sample(frac=1, random_state=seed)
     cols = ["uid", "layer", "feature", "density", "top_contexts", "top_tokens",
-            "top_promoted", "top_suppressed"]
+            "top_next_tokens", "top_promoted", "top_suppressed"]
     sheet = sample[[c for c in cols if c in sample]].copy()
     sheet["human_read_tag"] = ""
     sheet["human_write_tag"] = ""

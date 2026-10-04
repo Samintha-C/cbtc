@@ -7,8 +7,14 @@
   C5    entropy regulation: fraction of f_dec in the effective null space of
         W_U, i.e. its bottom-k singular directions (Stolfo et al. 2024).
   C7    internal / representation-building: max |cos(f_dec, downstream f_enc)|
-        relative to a random-direction baseline (the Eq. 7 wiring).
+        (the Eq. 7 wiring).
   C8    PCA / scale: |cos(f_dec, top residual principal components)|.
+
+C3, C5 and C7 are tagged on *_rz columns: robust z-scores against the latent's
+own layer (sampling-weighted median and MAD of its live latents). Their random-
+direction baselines (vocab_var_z, null_ratio, downstream_ratio) are kept for
+reference only: real decoders are not random directions, and on Gemma-2-2B the
+median latent already sits at 1.2-2.2x those baselines.
 
 The unembedding is read as a float16 memmap in vocab chunks, so this runs on CPU.
 """
@@ -89,6 +95,30 @@ def null_space_basis(W_U, k, chunk=16384):
     return vecs[:, :k]
 
 
+def _wmedian(x, w):
+    o = np.argsort(x)
+    cw = np.cumsum(w[o])
+    return x[o][np.searchsorted(cw, 0.5 * cw[-1])]
+
+
+def robust_z_by_layer(x, layer, weight, live, min_pop):
+    """(x - median) / (1.4826 * MAD), with the sampling-weighted median and MAD of
+    the live latents in the same layer; all layers pooled if a layer has too few."""
+    z = np.full(len(x), np.nan)
+    ok = live & np.isfinite(x)
+    for l in np.unique(layer):
+        idx = np.flatnonzero(layer == l)
+        ref = idx[ok[idx]]
+        if len(ref) < min_pop:
+            ref = np.flatnonzero(ok)
+        if len(ref) == 0:
+            continue
+        med = _wmedian(x[ref], weight[ref])
+        mad = _wmedian(np.abs(x[ref] - med), weight[ref])
+        z[idx] = (x[idx] - med) / max(1.4826 * mad, 1e-12)
+    return z
+
+
 def max_abs_cos(dec_u, enc, chunk=8192):
     best = np.zeros(dec_u.shape[0])
     for a in range(0, enc.shape[0], chunk):
@@ -148,4 +178,12 @@ def compute_write_stats(run, cfg):
             _, vecs = np.linalg.eigh(res["cov"])
             pcs = vecs[:, ::-1][:, :3]
             out.loc[idx, "pca_max_cos"] = np.abs(dec_u[idx] @ pcs).max(1)
+
+    # C3 / C5 / C7 are judged against the latent's own layer
+    live = (run.r_end - run.r_start)[lat["uid"].values] >= cfg.min_fires
+    for col, z_col in [("vocab_cos_var", "vocab_var_rz"), ("null_frac", "null_frac_rz"),
+                       ("downstream_max_cos", "downstream_rz")]:
+        out[z_col] = robust_z_by_layer(out[col].values.astype(float), lat["layer"].values,
+                                       lat["weight"].values.astype(float), live,
+                                       cfg.min_z_population)
     return out
