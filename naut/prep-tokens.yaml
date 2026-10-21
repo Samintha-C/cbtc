@@ -1,0 +1,107 @@
+# Step 1 of a full run (CPU only): tokenise and POS-tag the corpus into
+# runs/$RUN/tokens.npz.
+#
+# This is the slow CPU part of the GPU stage (spaCy over a few thousand
+# documents). Doing it here means the GPU job starts computing immediately
+# instead of holding an idle GPU, which is what the 40% utilisation rule in the
+# NRP cluster policies is about.
+#
+#   kubectl apply -f naut/prep-tokens.yaml
+#   kubectl logs -f job/cbtc-prep-tokens -n wenglab-interpretable-ai
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cbtc-prep-tokens
+  namespace: wenglab-interpretable-ai
+  labels:
+    experiment: cbtc
+    task: prep-tokens
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    spec:
+      containers:
+        - name: cpu-container
+          image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              ulimit -n 65536 || true
+
+              # Later runs reuse this tokens.npz: TOKENS_FROM in collect.yaml.
+              RUN=gemma2b
+              ROOT=/sc-rwx-vol/cbtc
+              RUN_DIR=$ROOT/runs/$RUN
+
+              LOG_DIR=$ROOT/logs
+              mkdir -p "$LOG_DIR" "$RUN_DIR"
+              LOG_FILE="$LOG_DIR/$(TZ='America/Los_Angeles' date +%Y%m%d_%H%M%S_%Z)_prep_tokens_$RUN.log"
+              exec > >(tee -a "$LOG_FILE") 2>&1
+              echo "=== Logging to $LOG_FILE ==="
+
+              if [ -f "$RUN_DIR/tokens.npz" ]; then
+                echo "[skip] $RUN_DIR/tokens.npz already exists"; exit 0
+              fi
+
+              apt-get update -q && apt-get install -y -q git
+
+              TMP_REPO=/tmp/cbtc
+              rm -rf "$TMP_REPO"
+              echo "=== Cloning cbtc ==="
+              git -c core.fsmonitor=false clone --depth 1 \
+                https://github.com/Samintha-C/cbtc.git "$TMP_REPO"
+
+              # Same transformers and spaCy versions as the GPU jobs, so the
+              # tokens and POS tags match what the smoke test produced.
+              export PIP_CACHE_DIR=/tmp/pip-cache
+              mkdir -p $PIP_CACHE_DIR
+              python -c 'import torch; print("torch==" + torch.__version__.split("+")[0])' > /tmp/constraints.txt
+              pip install --cache-dir $PIP_CACHE_DIR -q -c /tmp/constraints.txt \
+                "transformers>=4.56,<=4.57.3" \
+                "datasets>=2.18" \
+                "zstandard" \
+                "spacy>=3.7,<3.8" \
+                "numpy<2" \
+                "pandas>=2.0"
+              python -m spacy download en_core_web_sm
+
+              cd "$TMP_REPO"
+
+              echo ""
+              echo "=== Building tokens.npz (defaults: 8000 sequences x 128 tokens) ==="
+              python scripts/run_gpu_stage.py --out "$RUN_DIR" --prep-only
+
+              echo ""
+              echo "=== Done ==="
+              ls -la "$RUN_DIR"
+              echo "Next: kubectl apply -f naut/collect.yaml"
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: HF_HOME
+              value: "/sc-rwx-vol/cbtc/hf-cache"
+            # The Gemma tokenizer lives in the gated google/gemma-2-2b repo.
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sc-hf-token
+                  key: token
+          resources:
+            requests:
+              cpu: "2"
+              memory: "8Gi"
+            limits:
+              cpu: "2"
+              memory: "8Gi"
+          volumeMounts:
+            - name: sc-rwx-vol
+              mountPath: /sc-rwx-vol
+      volumes:
+        - name: sc-rwx-vol
+          persistentVolumeClaim:
+            claimName: sc-rwx-vol
+      restartPolicy: Never

@@ -33,24 +33,32 @@ NRP_URL = "https://ellm.nrp-nautilus.io/v1/chat/completions"
 NRP_CONCURRENCY = {"kimi": 2, "glm-5": 2, "deepseek-v4-flash": 2, "minimax-m2": 8,
                    "qwen3-small": 8, "gemma": 8, "gemma-small": 8, "qwen3": 16, "gpt-oss": 16}
 
+# Bump when the prompt or tag lists change: labels are stored per version, so a
+# rerun never mixes answers to different questions.
+PROMPT_VERSION = "v2"
+
+# Only what the rules cannot test. Token, previous-token, next-token, position and
+# domain explanations are measured by the rule-based detectors; for a latent the
+# rules left unresolved they have already been checked and failed. With them on
+# offer (v1), the LLM picked one for 58% of unresolved latents, B1_lexical for
+# latents whose top 5 tokens carry a median 24% of activation (the rule needs 80%).
 READ_CHOICES = {
+    "B4_syntax": "a syntactic role or construction (clause boundary, subject or object "
+                 "position, agreement), not merely one part of speech",
     "B7_semantic": "entity, object, attribute, or topic content",
     "B8_relational": "a relation or binding between entities (who/what relates to what)",
     "B9_task_value": "a task variable or value (number range, operand, digit pattern, count)",
     "B10_epistemic": "meta state: known vs unknown entity, uncertainty, refusal, a planned target",
-    "B1_lexical": "a specific token or small token family",
-    "B2_ngram_prev_token": "a multi-token pattern or the previous token",
-    "B3_position_structure": "position or distance to a structural boundary",
-    "B4_syntax": "part of speech, morphology, or syntactic role",
-    "B5_context": "document- or chunk-level context (language, code, genre, topic chunk)",
-    "B6_next_token": "fires where a specific token or token family is about to come next",
     "B_unclear": "no consistent pattern",
 }
+# C7_internal is left to the rule that measures decoder-encoder alignment; when the
+# promoted / suppressed tokens look incoherent, the honest label is "no direct effect"
+# (v1 answered C7_internal for 75% of write-unresolved latents, as a fallback).
 WRITE_CHOICES = {
     "C1_promote": "raises probability of a coherent token set",
     "C2_suppress": "lowers probability of a coherent token set",
     "C3_partition": "splits the vocabulary into two broad groups",
-    "C7_internal": "no coherent direct token effect; likely writes a representation for later layers",
+    "C_no_direct_effect": "promoted and suppressed tokens show no coherent pattern",
     "C_unclear": "cannot tell",
 }
 
@@ -78,6 +86,11 @@ def build_prompt(r):
         "layer", "density", "cur_top5_share", "prev_top5_share", "next_top5_share",
         "next_top5_excess", "pos_best", "pos_best_share", "seq_coverage", "domain_best",
         "domain_best_share", "vocab_kurtosis", "vocab_skew", "downstream_rz"]}
+    surface = ("Surface explanations (one token or small token family, the previous token, "
+               "the next token, position, document domain) were already tested statistically "
+               "for this latent and did not hold, so the options below exclude them. If the "
+               "pattern is really one of those, choose B_unclear and say so in the "
+               "description.\n\n") if r.get("tag_B") == "B_unresolved" else ""
     return f"""Layer {r['layer']} transcoder latent {r['feature']}.
 
 Top activating contexts (the firing token is in [[ ]]):
@@ -89,7 +102,7 @@ Tokens most PROMOTED by its decoder (direct logit effect): {r.get('top_promoted'
 Tokens most SUPPRESSED by its decoder: {r.get('top_suppressed', '')}
 Detector statistics: {json.dumps(stats)}
 
-Read-tag options:
+{surface}Read-tag options:
 {read_opts}
 
 Write-tag options:
@@ -108,6 +121,7 @@ def parse(text):
     if not isinstance(out, dict):
         return {"read_tag": "B_unclear", "write_tag": "C_unclear", "confidence": "low",
                 "parse_error": True}
+    out["prompt_version"] = PROMPT_VERSION
     if out.get("read_tag") not in READ_CHOICES:
         out["read_tag"] = "B_unclear"
     if out.get("write_tag") not in WRITE_CHOICES:

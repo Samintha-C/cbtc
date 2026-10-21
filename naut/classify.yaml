@@ -1,0 +1,94 @@
+# Step 3 of a full run (CPU only): classify every sampled latent with the
+# rule-based detectors (read, write and activation tags), then write the census
+# report and the blind validation sheet. Latents no rule catches are left as
+# "unresolved". No GPU, no model weights, no secrets. Safe to rerun as often as
+# you like while tuning thresholds in census/config.py; it only overwrites
+# runs/$RUN/census.
+#
+# To have an LLM label the unresolved leftovers, run classify-llm.yaml after this.
+#
+#   kubectl apply -f naut/classify.yaml
+#   kubectl logs -f job/cbtc-classify -n wenglab-interpretable-ai
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cbtc-classify
+  namespace: wenglab-interpretable-ai
+  labels:
+    experiment: cbtc
+    task: classify
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    spec:
+      containers:
+        - name: cpu-container
+          image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              ulimit -n 65536 || true
+
+              # Must match RUN in collect.yaml. RUN=gemma2b re-tags the first run
+              # (default transcoders) with the current detectors.
+              # RUN=smoke reruns it on the smoke output.
+              RUN=gemma2b-l0-50
+              ROOT=/sc-rwx-vol/cbtc
+              RUN_DIR=$ROOT/runs/$RUN
+
+              LOG_DIR=$ROOT/logs
+              mkdir -p "$LOG_DIR"
+              LOG_FILE="$LOG_DIR/$(TZ='America/Los_Angeles' date +%Y%m%d_%H%M%S_%Z)_classify_$RUN.log"
+              exec > >(tee -a "$LOG_FILE") 2>&1
+              echo "=== Logging to $LOG_FILE ==="
+
+              if [ ! -f "$RUN_DIR/weights.npz" ]; then
+                echo "ERROR: $RUN_DIR has no collect output. Run naut/collect.yaml first."; exit 1
+              fi
+
+              apt-get update -q && apt-get install -y -q git
+
+              TMP_REPO=/tmp/cbtc
+              rm -rf "$TMP_REPO"
+              echo "=== Cloning cbtc ==="
+              git -c core.fsmonitor=false clone --depth 1 \
+                https://github.com/Samintha-C/cbtc.git "$TMP_REPO"
+
+              export PIP_CACHE_DIR=/tmp/pip-cache
+              mkdir -p $PIP_CACHE_DIR
+              pip install --cache-dir $PIP_CACHE_DIR -q \
+                "pandas>=2.0" \
+                "matplotlib>=3.8"
+
+              cd "$TMP_REPO"
+
+              echo ""
+              echo "=== Classify: $RUN ==="
+              python scripts/run_offline.py --run "$RUN_DIR"
+
+              echo ""
+              echo "=== Saved ==="
+              ls -la "$RUN_DIR/census"
+              echo ""
+              echo "kubectl cp wenglab-interpretable-ai/sc-rwx-copy-pod:$RUN_DIR/census \\"
+              echo "  /Users/saminthachandrasiri/Research/TrustworthyMLLab/cbtc/runs/$RUN/census"
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+          resources:
+            requests:
+              cpu: "4"
+              memory: "16Gi"
+            limits:
+              cpu: "4"
+              memory: "16Gi"
+          volumeMounts:
+            - name: sc-rwx-vol
+              mountPath: /sc-rwx-vol
+      volumes:
+        - name: sc-rwx-vol
+          persistentVolumeClaim:
+            claimName: sc-rwx-vol
+      restartPolicy: Never

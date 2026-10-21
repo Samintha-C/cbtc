@@ -1,0 +1,149 @@
+# Step 2 of a full run (GPU): collect the raw measurements. Runs the model to
+# sample latents, cache their activations, export weights and measure ablation
+# KL. Defaults: layers 2 8 14 20 24, ~1M tokens, 300 latents per layer.
+#
+# Nothing is classified here. This only fills runs/$RUN/ with data; the tags
+# come from classify.yaml, which reads that directory and needs no GPU.
+#
+# Transcoders: TRANSCODERS below, a file in transcoder_sets/. The default matches
+# L0 at ~50 across layers; circuit-tracer's own "gemma" preset varies ~6x.
+#
+# Tokens: tokens.npz depends only on the tokenizer and corpus, not on the
+# transcoders, so a new run copies it from runs/$TOKENS_FROM instead of rerunning
+# prep-tokens.yaml. Exits early if neither directory has it.
+# Resume-guarded: exits 0 if the run already finished.
+#
+#   kubectl apply -f naut/collect.yaml
+#   kubectl logs -f job/cbtc-collect -n wenglab-interpretable-ai
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cbtc-collect
+  namespace: wenglab-interpretable-ai
+  labels:
+    experiment: cbtc
+    task: collect
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    spec:
+      containers:
+        - name: gpu-container
+          image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              ulimit -n 65536 || true
+
+              # RUN must match classify.yaml. TOKENS_FROM is the run whose
+              # tokens.npz to reuse (the one prep-tokens.yaml wrote).
+              RUN=gemma2b-l0-50
+              TOKENS_FROM=gemma2b
+              TRANSCODERS=transcoder_sets/gemma-2-2b-16k-l0-50.yaml
+              ROOT=/sc-rwx-vol/cbtc
+              RUN_DIR=$ROOT/runs/$RUN
+
+              LOG_DIR=$ROOT/logs
+              mkdir -p "$LOG_DIR"
+              LOG_FILE="$LOG_DIR/$(TZ='America/Los_Angeles' date +%Y%m%d_%H%M%S_%Z)_collect_$RUN.log"
+              exec > >(tee -a "$LOG_FILE") 2>&1
+              echo "=== Logging to $LOG_FILE ==="
+
+              # relevance.csv is the last file the GPU stage writes.
+              if [ -f "$RUN_DIR/relevance.csv" ]; then
+                echo "[skip] $RUN already complete"; exit 0
+              fi
+              if [ ! -f "$RUN_DIR/tokens.npz" ] && [ -f "$ROOT/runs/$TOKENS_FROM/tokens.npz" ]; then
+                mkdir -p "$RUN_DIR"
+                cp "$ROOT/runs/$TOKENS_FROM/tokens.npz" "$RUN_DIR/"
+                echo "[tokens] copied from runs/$TOKENS_FROM"
+              fi
+              if [ ! -f "$RUN_DIR/tokens.npz" ]; then
+                echo "ERROR: no tokens.npz in runs/$RUN or runs/$TOKENS_FROM. Run naut/prep-tokens.yaml first."; exit 1
+              fi
+
+              apt-get update -q && apt-get install -y -q git
+
+              TMP_REPO=/tmp/cbtc
+              rm -rf "$TMP_REPO"
+              echo "=== Cloning cbtc ==="
+              git -c core.fsmonitor=false clone --depth 1 \
+                https://github.com/Samintha-C/cbtc.git "$TMP_REPO"
+
+              # circuit-tracer comes from the upstream repo at a pinned tag. The
+              # package of the same name on PyPI is a third-party fork.
+              # No spaCy or datasets here: the corpus is already tokenised.
+              export PIP_CACHE_DIR=/tmp/pip-cache
+              mkdir -p $PIP_CACHE_DIR
+              python -c 'import torch; print("torch==" + torch.__version__.split("+")[0])' > /tmp/constraints.txt
+              pip install --cache-dir $PIP_CACHE_DIR -q -c /tmp/constraints.txt \
+                "circuit-tracer @ git+https://github.com/decoderesearch/circuit-tracer.git@v0.5.0" \
+                "transformer-lens>=2.16,<3" \
+                "pandas>=2.0"
+
+              cd "$TMP_REPO"
+              nvidia-smi --query-gpu=name,memory.total --format=csv
+
+              echo ""
+              echo "=== Collect: $RUN ($TRANSCODERS) ==="
+              # first run with a new transcoder set downloads it (26 x ~300MB) to HF_HOME
+              python scripts/run_gpu_stage.py --out "$RUN_DIR" --transcoders "$TRANSCODERS"
+
+              echo ""
+              echo "=== Done ==="
+              ls -la "$RUN_DIR"
+              echo "Next: kubectl apply -f naut/classify.yaml"
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            - name: HF_HOME
+              value: "/sc-rwx-vol/cbtc/hf-cache"
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sc-hf-token
+                  key: token
+          resources:
+            requests:
+              cpu: "4"
+              memory: "32Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: "32Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: sc-rwx-vol
+              mountPath: /sc-rwx-vol
+      volumes:
+        - name: sc-rwx-vol
+          persistentVolumeClaim:
+            claimName: sc-rwx-vol
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    # Ampere or newer (the model runs in bf16) with >= 24GB.
+                    # If the relevance pass runs out of memory on a 24GB card,
+                    # lower relevance_contexts in census/config.py.
+                    values:
+                      - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-GeForce-RTX-4090
+                      - NVIDIA-A10
+                      - NVIDIA-RTX-A5000
+                      - NVIDIA-L4
+                      - NVIDIA-A40
+                      - NVIDIA-L40
+                      - NVIDIA-L40S
+                      - NVIDIA-RTX-A6000
+                      - NVIDIA-A100-PCIE-40GB
+                      - NVIDIA-A100-SXM4-80GB
+                      - NVIDIA-A100-80GB-PCIe
+      restartPolicy: Never

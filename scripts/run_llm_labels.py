@@ -7,17 +7,21 @@ the NRP LLM gateway about each latent whose read or write tag is unresolved, and
 writes a second report to runs/<run>/census_llm/. The LLM only fills unresolved
 tags; it never relabels what a rule claimed. Needs NRP_API_KEY.
 
-Labels are appended to census_llm/llm_labels.jsonl as they arrive, so rerunning
-the same command resumes instead of starting over.
+Labels are appended to census_llm/llm_labels_<prompt version>.jsonl as they arrive,
+so rerunning the same command resumes instead of starting over; changing the prompt
+(PROMPT_VERSION in census/labeling.py) starts a fresh file. Write tags are not filled
+for early layers, where the rules also ignore vocabulary projections.
 """
 import argparse
+import json
 import os
 import sys
 
 import pandas as pd
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from census.labeling import label_latents
+from census.config import TagConfig
+from census.labeling import PROMPT_VERSION, label_latents
 from census.report import validation_sheet, write_report
 
 ap = argparse.ArgumentParser()
@@ -44,13 +48,18 @@ if args.max and len(todo) > args.max:   # round-robin over layers, random within
                 .sort_values("_k", kind="stable").head(args.max))
 print(f"{len(todo)} of {len(df)} latents to label | by layer {todo.layer.value_counts().sort_index().to_dict()}")
 
-labels = pd.DataFrame(label_latents(todo, os.path.join(out, "llm_labels.jsonl"),
+labels = pd.DataFrame(label_latents(todo, os.path.join(out, f"llm_labels_{PROMPT_VERSION}.jsonl"),
                                     model=args.model, workers=args.workers))
 if len(labels):
     labels = labels.rename(columns={c: f"llm_{c}" for c in labels.columns if c != "uid"})
     df = df.merge(labels, on="uid", how="left")
     fill_b = df["tag_B"].eq("B_unresolved") & df["llm_read_tag"].notna()
-    fill_c = df["tag_C"].eq("C_unresolved") & df["llm_write_tag"].notna()
+    # below early_layer_frac the rules ignore vocabulary projections as noise; the
+    # LLM's promote/suppress reading of the same projections is no better there
+    with open(os.path.join(args.run, "meta.json")) as f:
+        n_layers = json.load(f)["n_layers"]
+    early = df["layer"] < TagConfig().early_layer_frac * n_layers
+    fill_c = df["tag_C"].eq("C_unresolved") & df["llm_write_tag"].notna() & ~early
     df.loc[fill_b, "tag_B"] = df.loc[fill_b, "llm_read_tag"]
     df.loc[fill_c, "tag_C"] = df.loc[fill_c, "llm_write_tag"]
     if "llm_parse_error" in df:

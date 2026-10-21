@@ -1,0 +1,103 @@
+# Step 4 (CPU only, network): LLM labels for the latents the rules leave
+# unresolved, through the NRP managed LLM gateway (qwen3 by default). Reads the
+# rule-based census that classify.yaml wrote to runs/$RUN/census and writes a
+# second report to runs/$RUN/census_llm, so the rule-only report is kept for
+# comparison. The LLM only fills unresolved tags; it never relabels a rule's tag.
+#
+# Resumable: labels are appended to census_llm/llm_labels.jsonl as they arrive,
+# so deleting and re-applying the job continues where it stopped (raising
+# LLM_MAX after a quick check only labels the new ones).
+#
+# Needs the NRP LLM token (https://nrp.ai/llmtoken) in the secret
+# sc-nrp-llm-creds, key api_key; it already exists in the namespace.
+#
+#   kubectl apply -f naut/classify-llm.yaml
+#   kubectl logs -f job/cbtc-classify-llm -n wenglab-interpretable-ai
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cbtc-classify-llm
+  namespace: wenglab-interpretable-ai
+  labels:
+    experiment: cbtc
+    task: classify-llm
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    spec:
+      containers:
+        - name: cpu-container
+          image: python:3.11-slim
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+
+              # Must match RUN in collect.yaml and classify.yaml.
+              RUN=gemma2b-l0-50
+              LLM_MODEL=qwen3
+              LLM_WORKERS=8
+              # 0 labels everything eligible (~1,560 latents on gemma2b-l0-50).
+              # Set e.g. 50 for a quick check: picked evenly across layers.
+              LLM_MAX=500000
+              ROOT=/sc-rwx-vol/cbtc
+              RUN_DIR=$ROOT/runs/$RUN
+
+              LOG_DIR=$ROOT/logs
+              mkdir -p "$LOG_DIR"
+              LOG_FILE="$LOG_DIR/$(TZ='America/Los_Angeles' date +%Y%m%d_%H%M%S_%Z)_classify_llm_$RUN.log"
+              exec > >(tee -a "$LOG_FILE") 2>&1
+              echo "=== Logging to $LOG_FILE ==="
+
+              if [ ! -f "$RUN_DIR/census/census.csv" ]; then
+                echo "ERROR: $RUN_DIR/census/census.csv not found. Run naut/classify.yaml first."; exit 1
+              fi
+
+              apt-get update -q && apt-get install -y -q git
+
+              TMP_REPO=/tmp/cbtc
+              rm -rf "$TMP_REPO"
+              echo "=== Cloning cbtc ==="
+              git -c core.fsmonitor=false clone --depth 1 \
+                https://github.com/Samintha-C/cbtc.git "$TMP_REPO"
+
+              # The gateway is called over plain HTTP: no client package needed.
+              pip install -q --no-cache-dir "pandas>=2.0" "matplotlib>=3.8"
+
+              cd "$TMP_REPO"
+
+              echo ""
+              echo "=== LLM labels: $RUN ($LLM_MODEL, $LLM_WORKERS at a time) ==="
+              python scripts/run_llm_labels.py --run "$RUN_DIR" \
+                --model "$LLM_MODEL" --workers "$LLM_WORKERS" --max "$LLM_MAX"
+
+              echo ""
+              echo "=== Saved ==="
+              ls -la "$RUN_DIR/census_llm"
+              echo ""
+              echo "kubectl cp wenglab-interpretable-ai/sc-rwx-copy-pod:$RUN_DIR/census_llm \\"
+              echo "  /Users/saminthachandrasiri/Research/TrustworthyMLLab/cbtc/runs/$RUN/census_llm"
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: NRP_API_KEY
+              valueFrom:
+                secretKeyRef:
+                  name: sc-nrp-llm-creds
+                  key: api_key
+          resources:
+            requests:
+              cpu: "1"
+              memory: "2Gi"
+            limits:
+              cpu: "1"
+              memory: "2Gi"
+          volumeMounts:
+            - name: sc-rwx-vol
+              mountPath: /sc-rwx-vol
+      volumes:
+        - name: sc-rwx-vol
+          persistentVolumeClaim:
+            claimName: sc-rwx-vol
+      restartPolicy: Never

@@ -1,0 +1,150 @@
+# End-to-end smoke test: tiny GPU stage, then the offline stage on its output.
+# Uses the default transcoder set (GPUConfig.transcoder_set), so it also tests
+# that set's loading before a full collect run.
+# Run this before anything else. It exercises every first-run risk listed in
+# the README (tokenizer offsets, transcoder hook names, relevance-pass memory)
+# on 200 sequences and 2 layers.
+#
+# Unlike the README's local smoke command this does NOT pass --skip-relevance:
+# the ablation pass is the one with the memory risk, so it is worth the extra
+# couple of minutes to find out here rather than at the end of the full run.
+#   kubectl apply -f naut/smoke.yaml
+#   kubectl logs -f job/cbtc-smoke -n wenglab-interpretable-ai
+apiVersion: batch/v1
+kind: Job
+metadata:
+  name: cbtc-smoke
+  namespace: wenglab-interpretable-ai
+  labels:
+    experiment: cbtc
+    task: smoke
+spec:
+  ttlSecondsAfterFinished: 86400
+  backoffLimit: 0
+  template:
+    spec:
+      containers:
+        - name: smoke
+          # torch >= 2.6 is required by transformer-lens >= 2.16, so the 2.4/2.5
+          # images used by the other projects would make pip reinstall torch.
+          image: pytorch/pytorch:2.6.0-cuda12.4-cudnn9-runtime
+          command: ["bash", "-c"]
+          args:
+            - |
+              set -eo pipefail
+              ulimit -n 65536 || true
+
+              ROOT=/sc-rwx-vol/cbtc
+              RUN_DIR=$ROOT/runs/smoke
+
+              LOG_DIR=$ROOT/logs
+              mkdir -p "$LOG_DIR"
+              LOG_FILE="$LOG_DIR/$(TZ='America/Los_Angeles' date +%Y%m%d_%H%M%S_%Z)_smoke.log"
+              exec > >(tee -a "$LOG_FILE") 2>&1
+              echo "=== Logging to $LOG_FILE ==="
+
+              apt-get update -q && apt-get install -y -q git
+
+              TMP_REPO=/tmp/cbtc
+              rm -rf "$TMP_REPO"
+              echo "=== Cloning cbtc ==="
+              git -c core.fsmonitor=false clone --depth 1 \
+                https://github.com/Samintha-C/cbtc.git "$TMP_REPO"
+
+              # circuit-tracer comes from the upstream repo at a pinned tag. The
+              # package of the same name on PyPI is a third-party fork.
+              # One pip call so the resolver sees every constraint together
+              # (transformer-lens 2.x needs numpy<2, which rules out spaCy 3.8).
+              export PIP_CACHE_DIR=/tmp/pip-cache
+              mkdir -p $PIP_CACHE_DIR
+              python -c 'import torch; print("torch==" + torch.__version__.split("+")[0])' > /tmp/constraints.txt
+              pip install --cache-dir $PIP_CACHE_DIR -q -c /tmp/constraints.txt \
+                "circuit-tracer @ git+https://github.com/decoderesearch/circuit-tracer.git@v0.5.0" \
+                "transformer-lens>=2.16,<3" \
+                "datasets>=2.18" \
+                "zstandard" \
+                "spacy>=3.7,<3.8" \
+                "pandas>=2.0" \
+                "matplotlib>=3.8"
+              python -m spacy download en_core_web_sm
+
+              cd "$TMP_REPO"
+              nvidia-smi --query-gpu=name,memory.total --format=csv
+
+              # Fresh directory every time, so a rerun re-tokenises instead of
+              # reusing the previous smoke's tokens.npz.
+              rm -rf "$RUN_DIR"
+
+              echo ""
+              echo "=== Collect (layers 4 20, 200 sequences, 20 latents per layer) ==="
+              python scripts/run_gpu_stage.py --out "$RUN_DIR" \
+                --layers 4 20 \
+                --n-seqs 200 \
+                --latents-per-layer 20
+
+              echo ""
+              echo "=== Classify ==="
+              python scripts/run_offline.py --run "$RUN_DIR"
+
+              echo ""
+              echo "=== Done ==="
+              ls -la "$RUN_DIR" "$RUN_DIR/census"
+              echo ""
+              echo "kubectl cp wenglab-interpretable-ai/sc-rwx-copy-pod:$RUN_DIR/census \\"
+              echo "  /Users/saminthachandrasiri/Research/TrustworthyMLLab/cbtc/runs/smoke/census"
+          env:
+            - name: PYTHONUNBUFFERED
+              value: "1"
+            - name: TOKENIZERS_PARALLELISM
+              value: "false"
+            # On the PVC so the ~18GB of Gemma + transcoder weights download once
+            # and are reused by the full run.
+            - name: HF_HOME
+              value: "/sc-rwx-vol/cbtc/hf-cache"
+            # google/gemma-2-2b is gated: the token's account must have accepted
+            # the licence on huggingface.co.
+            - name: HF_TOKEN
+              valueFrom:
+                secretKeyRef:
+                  name: sc-hf-token
+                  key: token
+          resources:
+            requests:
+              cpu: "4"
+              memory: "32Gi"
+              nvidia.com/gpu: "1"
+            limits:
+              cpu: "4"
+              memory: "32Gi"
+              nvidia.com/gpu: "1"
+          volumeMounts:
+            - name: sc-rwx-vol
+              mountPath: /sc-rwx-vol
+      volumes:
+        - name: sc-rwx-vol
+          persistentVolumeClaim:
+            claimName: sc-rwx-vol
+      affinity:
+        nodeAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            nodeSelectorTerms:
+              - matchExpressions:
+                  - key: nvidia.com/gpu.product
+                    operator: In
+                    # Ampere or newer (the model runs in bf16) with >= 24GB.
+                    # Gemma-2-2B plus 26 transcoders (encoders and decoders) is
+                    # ~9GB; the relevance pass adds several GB of 256k-vocab logits.
+                    values:
+                      - NVIDIA-GeForce-RTX-3090
+                      - NVIDIA-GeForce-RTX-4090
+                      - NVIDIA-A10
+                      - NVIDIA-RTX-A5000
+                      - NVIDIA-L4
+                      - NVIDIA-A40
+                      - NVIDIA-L40
+                      - NVIDIA-L40S
+                      - NVIDIA-RTX-A6000
+                      - NVIDIA-A100-PCIE-40GB
+                      - NVIDIA-A100-SXM4-80GB
+                      - NVIDIA-A100-80GB-PCIe
+      restartPolicy: Never
